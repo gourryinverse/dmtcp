@@ -62,6 +62,7 @@ enum ProtectedFds {
   ENVIRON_FD,
   NS_FD,
   DEBUG_SOCKET_FD,
+  MPI_PROXY_FD,
   FD_END
 };
 
@@ -86,6 +87,7 @@ enum ProtectedFds {
 #define PROTECTED_ENVIRON_FD              protectedFdBase() + ENVIRON_FD
 #define PROTECTED_NS_FD                   protectedFdBase() + NS_FD
 #define PROTECTED_DEBUG_SOCKET_FD         protectedFdBase() + DEBUG_SOCKET_FD
+#define PROTECTED_MPI_PROXY_FD            protectedFdBase() + MPI_PROXY_FD
 #define PROTECTED_FD_END                  protectedFdBase() + FD_END
 
 #define DMTCP_IS_PROTECTED_FD(fd) \
