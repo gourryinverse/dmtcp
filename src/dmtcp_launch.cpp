@@ -392,7 +392,9 @@ int main ( int argc, char** argv )
 {
   Util::setProtectedFdBase();
   for (int fd = PROTECTED_FD_START; fd < PROTECTED_FD_END; fd++) {
-    close(fd);
+    if (fd != PROTECTED_MPI_PROXY_FD) {
+      close(fd);
+    }
   }
 
   if (! getenv(ENV_VAR_QUIET))
