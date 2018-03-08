@@ -1,4 +1,5 @@
 clean.sh
+libdmtcp_mpi-proxy.so
 mpi_proxy
 test/hello/hw_performance
 test/hello/mpi_hello_world
