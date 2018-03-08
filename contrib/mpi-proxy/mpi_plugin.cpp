@@ -10,10 +10,11 @@
 #include <unistd.h>
 #include <string.h>
 #include <sys/types.h>
+#include <fcntl.h>
 #include <mpi.h>
 #include <vector>
-#include "mpi_proxy.h"
 
+#include "mpi_proxy.h"
 #include "config.h"
 #include "dmtcp.h"
 #include "jassert.h"
@@ -55,6 +56,31 @@ int Receive_Int_From_Proxy(int connfd)
     status = read(connfd, &retval, sizeof(int));
     // TODO: error check
     return retval;
+}
+
+bool g_send_pending;
+bool g_restart_receive;
+bool g_restart_retval;
+int Receive_Int_From_Proxy_Nonblock(int connfd)
+{
+  int flags = 0;
+  int status = EWOULDBLOCK;
+  int retval = 0;
+  while (status == EWOULDBLOCK && !g_restart_receive)
+  {
+    DMTCP_PLUGIN_DISABLE_CKPT();
+    if (g_restart_receive)
+      continue;
+    flags = fcntl(connfd, F_GETFL, 0);
+    fcntl(connfd, F_SETFL, flags | O_NONBLOCK);
+    status = read(connfd, &retval, sizeof(int));
+    fcntl(connfd, F_SETFL, flags);
+    DMTCP_PLUGIN_ENABLE_CKPT();
+  }
+
+  if (g_restart_receive)
+    retval = g_restart_retval;
+  return retval;
 }
 
 int Receive_Buf_From_Proxy(int connfd, void* buf, int size)
@@ -282,6 +308,9 @@ MPI_Send(const void *buf, int count, MPI_Datatype datatype, int dest, int tag,
   status = MPI_Type_size(datatype, &size);
 
   DMTCP_PLUGIN_DISABLE_CKPT();
+  g_send_pending = true;
+  g_restart_receive = false;
+  g_restart_retval = 0;
   if (status == MPI_SUCCESS)
   {
     Send_Int_To_Proxy(PROTECTED_MPI_PROXY_FD, MPIProxy_Cmd_Send);
@@ -298,12 +327,11 @@ MPI_Send(const void *buf, int count, MPI_Datatype datatype, int dest, int tag,
     Send_Int_To_Proxy(PROTECTED_MPI_PROXY_FD, (int)comm);
 
     // Get the status
-    status = Receive_Int_From_Proxy(PROTECTED_MPI_PROXY_FD);
   }
   glocal_sent++;
   DMTCP_PLUGIN_ENABLE_CKPT();
 
-  // FIXME: wait_for_complete();
+  status = Receive_Int_From_Proxy_Nonblock(PROTECTED_MPI_PROXY_FD);
 
   return status;
 }
@@ -607,6 +635,13 @@ pre_ckpt_drain_data_from_proxy()
 {
   get_packets_sent();
   get_packets_recv();
+
+  if (g_send_pending)
+  {
+    g_restart_retval = Receive_Int_From_Proxy(PROTECTED_MPI_PROXY_FD);
+    g_restart_receive = true;
+  }
+
   while (gworld_sent != gworld_recv)
   {
     drain_packet();

@@ -116,8 +116,6 @@ void MPIProxy_Type_size(int connfd)
 }
 
 
-std::vector<MPI_Request *>grequest_queue;
-
 void MPIProxy_Send(int connfd)
 {
   int retval = 0;
@@ -128,8 +126,6 @@ void MPIProxy_Send(int connfd)
   int numread = 0;
   MPI_Datatype datatype;
   MPI_Comm comm;
-  MPI_Request request;;
-  memset(&request, 0x0, sizeof(MPI_Request));
 
   // Collect the arguments
   size = MPIProxy_Receive_Arg_Int(connfd);
@@ -148,7 +144,7 @@ void MPIProxy_Send(int connfd)
 
   // Do the send
   // FIXME: do i need to keep track of these for any reason?
-  retval = MPI_Isend(buf, count, datatype, dest, tag, comm, &request);
+  retval = MPI_Send(buf, count, datatype, dest, tag, comm);
 
   if (retval != MPI_SUCCESS)
   {
