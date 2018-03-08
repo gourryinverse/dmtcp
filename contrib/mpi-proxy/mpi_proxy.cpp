@@ -50,6 +50,13 @@ int MPIProxy_Send_Arg_Int(int connfd, int arg)
   return status;
 }
 
+int MPIProxy_Receive_Arg_Buf(int connfd, void *buf, int size)
+{
+  int status = read(connfd, buf, size);
+  // TODO: error check
+  return status;
+}
+
 int MPIProxy_Send_Arg_Buf(int connfd, void *buf, int size)
 {
   int status = write(connfd, buf, size);
@@ -154,6 +161,67 @@ void MPIProxy_Send(int connfd)
 
   free(buf); // TODO: Should I free here?
   MPIProxy_Return_Answer(connfd, retval);
+}
+
+void MPIProxy_Isend(int connfd)
+{
+  int retval = 0;
+  void * buf = NULL;
+  int size = 0;
+  int count, dest, tag;
+  int msgid;  // used to verify it was sent
+  int numread = 0;
+  MPI_Datatype datatype;
+  MPI_Comm comm;
+  MPI_Request request;
+  memset(&request, 0x0, sizeof(MPI_Request));
+
+  // Collect the arguments
+  size = MPIProxy_Receive_Arg_Int(connfd);
+
+  // Buffer read
+  buf = malloc(size);
+  while (numread < size)
+    numread += read(connfd, ((char *)buf)+numread, size-numread);
+
+  // rest of the arguments
+  count = MPIProxy_Receive_Arg_Int(connfd);
+  datatype = (MPI_Datatype) MPIProxy_Receive_Arg_Int(connfd);
+  dest = MPIProxy_Receive_Arg_Int(connfd);
+  tag = MPIProxy_Receive_Arg_Int(connfd);
+  comm = (MPI_Comm) MPIProxy_Receive_Arg_Int(connfd);
+  MPIProxy_Receive_Arg_Buf(connfd, &request, sizeof(MPI_Request));
+
+  // Do the send
+  // FIXME: do i need to keep track of these for any reason?
+  retval = MPI_Isend(buf, count, datatype, dest, tag, comm, &request);
+
+  if (retval != MPI_SUCCESS)
+  {
+    printf("Proxy - SEND FAILED\n");
+    fflush(stdout);
+  }
+
+  // free(buf); // FIXME: Leaking memory!!!!
+  // this should be resolved trivially by sharing memory
+
+  MPIProxy_Return_Answer(connfd, retval);
+  MPIProxy_Send_Arg_Buf(connfd, &request, sizeof(MPI_Request));
+}
+
+void MPIProxy_Wait(int connfd)
+{
+  int retval = 0;
+  MPI_Request request;
+  MPI_Status status;
+
+  MPIProxy_Receive_Arg_Buf(connfd, &request, sizeof(MPI_Request));
+  MPIProxy_Receive_Arg_Buf(connfd, &status, sizeof(MPI_Status));
+
+  MPI_Wait(&request, &status);
+
+  MPIProxy_Send_Arg_Buf(connfd, &request, sizeof(MPI_Request));
+  MPIProxy_Send_Arg_Buf(connfd, &status, sizeof(MPI_Status));
 }
 
 void MPIProxy_Recv(int connfd)
@@ -291,9 +359,17 @@ void proxy(int connfd)
       serial_printf("PROXY(Send) - ");
       MPIProxy_Send(connfd);
       break;
+    case MPIProxy_Cmd_Isend:
+      serial_printf("PROXY(Isend) - ");
+      MPIProxy_Isend(connfd);
+      break;
     case MPIProxy_Cmd_Recv:
       serial_printf("PROXY(Recv) - ");
       MPIProxy_Recv(connfd);
+      break;
+    case MPIProxy_Cmd_Wait:
+      serial_printf("PROXY(Wait) - ");
+      MPIProxy_Wait(connfd);
       break;
     case MPIProxy_Cmd_Type_size:
       serial_printf("PROXY(Type_size) - ");

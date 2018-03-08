@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <mpi.h>
 #include <vector>
+#include <map>
 
 #include "mpi_proxy.h"
 #include "config.h"
@@ -58,10 +59,9 @@ int Receive_Int_From_Proxy(int connfd)
     return retval;
 }
 
-bool g_send_pending;
 bool g_restart_receive;
 bool g_restart_retval;
-int Receive_Int_From_Proxy_Nonblock(int connfd)
+int Complete_Blocking_Call_Safely(int connfd)
 {
   int flags = 0;
   int status = EWOULDBLOCK;
@@ -70,7 +70,10 @@ int Receive_Int_From_Proxy_Nonblock(int connfd)
   {
     DMTCP_PLUGIN_DISABLE_CKPT();
     if (g_restart_receive)
-      continue;
+    {
+      DMTCP_PLUGIN_ENABLE_CKPT();
+      break;
+    }
     flags = fcntl(connfd, F_GETFL, 0);
     fcntl(connfd, F_SETFL, flags | O_NONBLOCK);
     status = read(connfd, &retval, sizeof(int));
@@ -298,6 +301,8 @@ MPI_Get_count(const MPI_Status *status, MPI_Datatype datatype, int *count)
   DMTCP_PLUGIN_ENABLE_CKPT();
 }
 
+// Blocking Call must be handled safely
+bool g_pending_send;
 EXTERNC int
 MPI_Send(const void *buf, int count, MPI_Datatype datatype, int dest, int tag,
           MPI_Comm comm)
@@ -308,7 +313,7 @@ MPI_Send(const void *buf, int count, MPI_Datatype datatype, int dest, int tag,
   status = MPI_Type_size(datatype, &size);
 
   DMTCP_PLUGIN_DISABLE_CKPT();
-  g_send_pending = true;
+  g_pending_send = true;
   g_restart_receive = false;
   g_restart_retval = 0;
   if (status == MPI_SUCCESS)
@@ -331,10 +336,146 @@ MPI_Send(const void *buf, int count, MPI_Datatype datatype, int dest, int tag,
   glocal_sent++;
   DMTCP_PLUGIN_ENABLE_CKPT();
 
-  status = Receive_Int_From_Proxy_Nonblock(PROTECTED_MPI_PROXY_FD);
+  // Block *safely* until we receive the status back
+  // this _Safely call handles the situation where a ckpt/restart
+  // occurs during the process of waiting for the Recv to occur
+  status = Complete_Blocking_Call_Safely(PROTECTED_MPI_PROXY_FD);
 
   return status;
 }
+
+std::map<MPI_Request*, bool> g_request_map;
+std::map<MPI_Request*, MPI_Status*> g_test_status_map;
+
+EXTERNC int
+MPI_Isend(const void *buf, int count, MPI_Datatype datatype, int dest, int tag,
+          MPI_Comm comm, MPI_Request* request)
+{
+  int status = 0xFFFFFFFF;
+  int size = 0;
+
+  status = MPI_Type_size(datatype, &size);
+
+  DMTCP_PLUGIN_DISABLE_CKPT();
+  if (status == MPI_SUCCESS)
+  {
+    // TODO: Only need to do this if it's a stack pointer?
+    // if this is a heap pointer, we can share the malloc'd page
+    g_request_map[request] = false;
+    g_test_status_map[request] = NULL;
+
+    Send_Int_To_Proxy(PROTECTED_MPI_PROXY_FD, MPIProxy_Cmd_Send);
+
+    // Buf part
+    Send_Int_To_Proxy(PROTECTED_MPI_PROXY_FD, count * size);
+    write(PROTECTED_MPI_PROXY_FD, buf, count*size);
+
+    // rest of stuff
+    Send_Int_To_Proxy(PROTECTED_MPI_PROXY_FD, count);
+    Send_Int_To_Proxy(PROTECTED_MPI_PROXY_FD, (int)datatype);
+    Send_Int_To_Proxy(PROTECTED_MPI_PROXY_FD, dest);
+    Send_Int_To_Proxy(PROTECTED_MPI_PROXY_FD, tag);
+    Send_Int_To_Proxy(PROTECTED_MPI_PROXY_FD, (int)comm);
+    Send_Buf_To_Proxy(PROTECTED_MPI_PROXY_FD, request, sizeof(MPI_Request));
+
+    // Get the status
+    status = Receive_Int_From_Proxy(PROTECTED_MPI_PROXY_FD);
+
+    // Get the Request Info
+    Receive_Buf_From_Proxy(PROTECTED_MPI_PROXY_FD,
+                            request,
+                            sizeof(MPI_Request));
+  }
+  glocal_sent++;
+  DMTCP_PLUGIN_ENABLE_CKPT();
+
+  return status;
+}
+
+bool g_pending_wait;
+MPI_Request* g_pending_wait_request;
+MPI_Status* g_pending_wait_status;
+
+// Blocking Call must be handled safely
+EXTERNC int
+MPI_Wait(MPI_Request* request, MPI_Status* status)
+{
+  int flags = 0;
+  int sockstat = EWOULDBLOCK;
+  int retval = 0;
+
+  // Send Wait request
+  DMTCP_PLUGIN_DISABLE_CKPT();
+  g_pending_wait = true;
+  g_restart_receive = false;
+  g_restart_retval = 0;
+  g_pending_wait_request = request;
+  g_pending_wait_status = status;
+  Send_Int_To_Proxy(PROTECTED_MPI_PROXY_FD, MPIProxy_Cmd_Wait);
+  Send_Buf_To_Proxy(PROTECTED_MPI_PROXY_FD, request, sizeof(MPI_Request));
+  Send_Buf_To_Proxy(PROTECTED_MPI_PROXY_FD, status, sizeof(MPI_Status));
+  DMTCP_PLUGIN_ENABLE_CKPT();
+
+  // Block *safely* until we receive the status back
+  // handle the ckpt/restart case during this blocking call gracefully
+  while (sockstat == EWOULDBLOCK && !g_restart_receive)
+  {
+    DMTCP_PLUGIN_DISABLE_CKPT();
+    if (g_restart_receive)
+    {
+      DMTCP_PLUGIN_ENABLE_CKPT();
+      break;
+    }
+    flags = fcntl(PROTECTED_MPI_PROXY_FD, F_GETFL, 0);
+    fcntl(PROTECTED_MPI_PROXY_FD, F_SETFL, flags | O_NONBLOCK);
+    sockstat = read(PROTECTED_MPI_PROXY_FD, &retval, sizeof(int));
+    fcntl(PROTECTED_MPI_PROXY_FD, F_SETFL, flags);
+    if (sockstat != EWOULDBLOCK)
+    {
+      // we waited successfully, get the rest
+      // this must be done before re-enabling checkpoint
+      Receive_Buf_From_Proxy(PROTECTED_MPI_PROXY_FD,
+                              request,
+                              sizeof(MPI_Request));
+      Receive_Buf_From_Proxy(PROTECTED_MPI_PROXY_FD,
+                              status,
+                              sizeof(MPI_Status));
+    }
+    DMTCP_PLUGIN_ENABLE_CKPT();
+  }
+
+  if (g_restart_receive)
+    retval = g_restart_retval;
+
+  return retval;
+}
+
+/*
+  FIXME: https://stackoverflow.com/questions/22410827/mpi-reuse-mpi-request
+
+  It's just fine to reuse your MPI_Request objects as long as they're completed
+  before you use them again (either by completing the request or freeing the
+  request object manually using MPI_REQUEST_FREE).
+
+  Variables of type MPI_Request are not request objects themselves but rather
+  just opaque handles (something like an abstract pointer) to the real MPI
+  request objects. Assigning a new value to such a variable in no way affects
+  the MPI object and only breaks the association to it. Therefore the object
+  might become inaccessible in the sense that if no handle to it exists in your
+  program, it can no longer be passed to MPI calls. This is the same as losing a
+  pointer to a dynamically allocated memory block, thus leaking it.
+
+  When it comes to asynchronous request handles, once the operation is completed
+  MPI destroys the request object and MPI_Wait* / MPI_Test* set the passed
+  handle variable to MPI_REQUEST_NULL on return. Also, a call to
+  MPI_Request_free will mark the request for deletion and set the handle to
+  MPI_REQUEST_NULL on return. At that point you can reuse the variable and store
+  a different request handle in it.
+
+  The same applies to handles to communicators (of type MPI_Comm), handles to
+  datatypes (of type MPI_Datatype), handles to reduce operations (of type
+  MPI_Op), and so on.
+*/
 
 EXTERNC int
 MPI_Iprobe(int source, int tag, MPI_Comm comm, int *flag,
@@ -631,16 +772,33 @@ publish_packets_recv()
 }
 
 static void
+complete_blocking_call()
+{
+  if (g_pending_send)
+  {
+    g_restart_retval = Receive_Int_From_Proxy(PROTECTED_MPI_PROXY_FD);
+    g_restart_receive = true;
+    g_pending_send = false;
+  }
+  else if (g_pending_wait)
+  {
+    g_restart_retval = Receive_Int_From_Proxy(PROTECTED_MPI_PROXY_FD);
+    g_restart_receive = true;
+    Receive_Buf_From_Proxy(PROTECTED_MPI_PROXY_FD, g_pending_wait_request,
+                            sizeof(MPI_Request));
+    Receive_Buf_From_Proxy(PROTECTED_MPI_PROXY_FD, g_pending_wait_status,
+                            sizeof(MPI_Status));
+    g_pending_wait = false;
+  }
+}
+
+static void
 pre_ckpt_drain_data_from_proxy()
 {
   get_packets_sent();
   get_packets_recv();
 
-  if (g_send_pending)
-  {
-    g_restart_retval = Receive_Int_From_Proxy(PROTECTED_MPI_PROXY_FD);
-    g_restart_receive = true;
-  }
+  complete_blocking_call();
 
   while (gworld_sent != gworld_recv)
   {
@@ -650,6 +808,8 @@ pre_ckpt_drain_data_from_proxy()
     publish_packets_recv();
     get_packets_recv();
   }
+
+  // TODO: set all g_request_map[x] to true and *x = MPI_REQUEST_NULL
 
   // on restart, we want to start totally fresh, since everything
   // is sent and received, these numbers are now totally irrelevant
