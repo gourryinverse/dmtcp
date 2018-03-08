@@ -1,0 +1,8 @@
+clean.sh
+mpi_proxy
+test/hello/hw_performance
+test/hello/mpi_hello_world
+test/send_recv/ping_pong
+test/send_recv/ring
+test/send_recv/send_recv
+test/send_recv/send_recv_many
