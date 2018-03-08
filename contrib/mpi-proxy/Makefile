@@ -29,6 +29,7 @@ default: ${LIBNAME}.so mpi_proxy
 tests:
 	cd test/hello; make; cd ../../
 	cd test/send_recv; make; cd ../../
+	cd test/performance; make; cd ../../
 
 check: ${LIBNAME}.so tests mpi_proxy
 	# Kill an old coordinator on this port if present, just in case.

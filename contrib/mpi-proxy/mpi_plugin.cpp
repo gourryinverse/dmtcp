@@ -60,8 +60,12 @@ int Receive_Int_From_Proxy(int connfd)
 int Receive_Buf_From_Proxy(int connfd, void* buf, int size)
 {
   int status = 0;
-  status = read(connfd, buf, size);
-  return status;
+  int numread = 0;
+  while (numread < size)
+  {
+    numread = read(connfd, ((char *)buf)+numread, size-numread);
+  }
+  return numread > 0;
 }
 
 int Send_Int_To_Proxy(int connfd, int arg)

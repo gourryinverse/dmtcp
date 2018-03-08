@@ -125,6 +125,7 @@ void MPIProxy_Send(int connfd)
   int size = 0;
   int count, dest, tag;
   int msgid;  // used to verify it was sent
+  int numread = 0;
   MPI_Datatype datatype;
   MPI_Comm comm;
   MPI_Request request;;
@@ -135,7 +136,8 @@ void MPIProxy_Send(int connfd)
 
   // Buffer read
   buf = malloc(size);
-  read(connfd, buf, size);
+  while (numread < size)
+    numread += read(connfd, ((char *)buf)+numread, size-numread);
 
   // rest of the arguments
   count = MPIProxy_Receive_Arg_Int(connfd);

@@ -18,5 +18,8 @@ ring: ring.c
 typesize: typesize.c
 	${MPICC} -o typesize typesize.c
 
+typesize: many_performance.c
+	${MPICC} -o many_performance many_performance.c
+
 clean:
 	rm -f ${EXECS}
