@@ -209,9 +209,14 @@ void MPIProxy_Isend(int connfd)
   MPIProxy_Send_Arg_Buf(connfd, &request, sizeof(MPI_Request));
 }
 
+std::map<MPI_Request, void *> g_hanging_irecv;
+std::map<MPI_Request, int> g_hanging_irecv_size;
 void MPIProxy_Wait(int connfd)
 {
   int retval = 0;
+  int irecv_size = 0;
+  void* ircv_buf = NULL;
+  std::map<MPI_Request, void*>::iterator it1;
   MPI_Request request;
   MPI_Status status;
 
@@ -219,6 +224,18 @@ void MPIProxy_Wait(int connfd)
   MPIProxy_Receive_Arg_Buf(connfd, &status, sizeof(MPI_Status));
 
   MPI_Wait(&request, &status);
+
+  it = g_hanging_irecv.find(request);
+  if (it != g_hanging_irecv.end())
+  {
+    irecv_buf = g_hanging_irecv[request];
+    irecv_size = g_hanging_irecv_size[request];
+    g_hanging_irecv.erase(request);
+    g_hanging_irecv_size.erase(request);
+    MPI_Proxy_Send_Arg_Buf(connfd, g_hanging_irecv[request],
+                                    g_hanging_irecv_size[request]);
+    free(irecv_buf);
+  }
 
   MPIProxy_Send_Arg_Buf(connfd, &request, sizeof(MPI_Request));
   MPIProxy_Send_Arg_Buf(connfd, &status, sizeof(MPI_Status));
@@ -279,6 +296,47 @@ void MPIProxy_Recv(int connfd)
   free(buf);
 }
 
+void MPIProxy_Irecv(int connfd)
+{
+  int status = 0;
+  void * buf;
+  int size = 0;
+  int count, source, tag;
+  MPI_Datatype datatype;
+  MPI_Comm comm;
+  int mpi_status_arg;
+  MPI_Request mpi_request;
+
+  // Collect the arguments
+  count = MPIProxy_Receive_Arg_Int(connfd);
+  datatype = (MPI_Datatype) MPIProxy_Receive_Arg_Int(connfd);
+  source = MPIProxy_Receive_Arg_Int(connfd);
+  tag = MPIProxy_Receive_Arg_Int(connfd);
+  comm = (MPI_Comm) MPIProxy_Receive_Arg_Int(connfd);
+  MPIProxy_Receive_Arg_Buf(connfd, &mpi_request, sizeof(MPI_Request));
+
+  // Do the receive
+  MPI_Type_size(datatype, &size);
+  size = count * size;
+  buf = malloc(size);
+
+
+  // TODO: Check that mpi_status is correctly used here
+  serial_printf("PROXY: RECIEVING - ");
+  status = MPI_Irecv(buf, count, datatype, source, tag, comm, mpi_status,
+                      &mpi_request);
+  serial_printf("\tDONE");
+
+  g_hanging_irecv[*mpi_request] = buf;
+  g_hanging_irecv_size[*mpi_request] = size;
+
+  // Return receive's status
+  MPIProxy_Return_Answer(connfd, status);
+  if (status == MPI_SUCCESS)
+  {
+    MPIProxy_Send_Arg_Buf(connfd, mpi_request, sizeof(MPI_Request));
+  }
+}
 
 void MPIProxy_Iprobe(int connfd)
 {

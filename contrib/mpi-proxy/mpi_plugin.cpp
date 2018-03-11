@@ -440,6 +440,13 @@ MPI_Wait(MPI_Request* request, MPI_Status* status)
       Receive_Buf_From_Proxy(PROTECTED_MPI_PROXY_FD,
                               status,
                               sizeof(MPI_Status));
+
+      // TODO: if this was a Wait for an Irecv, update the receive buffer
+      // void * buf = g_irecv_buffers[request]
+      // unsigned int bufsize = g_buffer_size[request]
+      // Receive_Buf_From_Proxy(PROTECTED_MPI_PROXY_FD, buf, bufsize);
+      // g_irecv_buffers.delete(request)
+      // g_buffer_size.delete(request)
     }
     DMTCP_PLUGIN_ENABLE_CKPT();
   }
@@ -567,6 +574,45 @@ MPI_Recv(void *buf, int count, MPI_Datatype datatype, int source, int tag,
   }
   return status;
 }
+
+
+std::map<MPI_Request*, void *> g_irecv_buffer;
+std::map<MPI_Request*, int> g_irecv_buffer_size;
+EXTERNC int
+MPI_Irecv(void *buf, int count, MPI_Datatype datatype, int source, int tag,
+          MPI_Comm comm, MPI_Request *request)
+{
+  int status = 0xFFFFFFFF;
+  int size = 0;
+  bool done = false;
+
+  // calculate total size of expected message before we do anything
+  status = MPI_Type_size(datatype, &size);
+  size = size * count;
+
+  // during this critical section we must disable checkpointing
+  DMTCP_PLUGIN_DISABLE_CKPT();
+  Send_Int_To_Proxy(PROTECTED_MPI_PROXY_FD, MPIProxy_Cmd_Irecv);
+  Send_Int_To_Proxy(PROTECTED_MPI_PROXY_FD, count);
+  Send_Int_To_Proxy(PROTECTED_MPI_PROXY_FD, (int)datatype);
+  Send_Int_To_Proxy(PROTECTED_MPI_PROXY_FD, source);
+  Send_Int_To_Proxy(PROTECTED_MPI_PROXY_FD, tag);
+  Send_Int_To_Proxy(PROTECTED_MPI_PROXY_FD, (int)comm);
+  Send_Buf_To_Proxy(PROTECTED_MPI_PROXY_FD, request, sizeof(MPI_Request));
+
+  status = Receive_Int_From_Proxy(PROTECTED_MPI_PROXY_FD);
+  if (status == 0)
+  {
+    Receive_Buf_From_Proxy(PROTECTED_MPI_PROXY_FD, &request,
+                            sizeof(MPI_Request));
+    g_irecv_buffer[*request] = buf;
+    g_irecv_buffer_size[*request] = size;
+  }
+  DMTCP_PLUGIN_ENABLE_CKPT();
+
+  return status;
+}
+
 
 
 EXTERNC int
@@ -793,6 +839,23 @@ complete_blocking_call()
 }
 
 static void
+drain_irecvs()
+{
+  // TODO: if this was a Wait for an Irecv, update the receive buffer
+  // for (queued_irecv)
+    // MPI_Test(Request, Status)
+    // if (ready)
+      // void * buf = g_irecv_buffers[request]
+      // unsigned int bufsize = g_buffer_size[request]
+      // Receive_Buf_From_Proxy(PROTECTED_MPI_PROXY_FD, buf, bufsize);
+      // g_irecv_buffers.delete(request)
+      // g_buffer_size.delete(request)
+      // g_replay_commands.delete(request)
+      // TODO: update cached irecv Requests
+      // received_msgs++;
+}
+
+static void
 pre_ckpt_drain_data_from_proxy()
 {
   get_packets_sent();
@@ -802,6 +865,7 @@ pre_ckpt_drain_data_from_proxy()
 
   while (gworld_sent != gworld_recv)
   {
+    drain_irecvs();
     drain_packet();
     // we have to call this every time to get up to date numbers
     // of all the proxies, since we're not the only one waiting
